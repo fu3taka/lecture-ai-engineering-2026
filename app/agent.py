@@ -16,7 +16,7 @@ import inspect
 import json
 from pathlib import Path
 
-from pydantic_ai import Agent
+from pydantic_ai import Agent, DeferredToolRequests
 from pydantic_ai.exceptions import ModelHTTPError
 from fastmcp import Client
 from pydantic_ai.mcp import MCPToolset, StdioTransport
@@ -38,12 +38,15 @@ INSTRUCTIONS = """\
 """
 
 # モデルは実行時に渡す（テストではAPIを呼ばない TestModel に差し替えるため）
-agent = Agent(instructions=INSTRUCTIONS)
+agent = Agent(instructions=INSTRUCTIONS, output_type=[str, DeferredToolRequests])
 agent.tool_plain(tools.search_glossary)
 agent.tool_plain(tools.get_lecture_summary)
 
 # TODO(第3回 演習): tools.py に make_quiz を作り、ここで登録しよう
 agent.tool_plain(tools.make_quiz)
+
+# 第3回 宿題: 学習の記録を保存するツール (保存の前に承認が必要)
+agent.tool_plain(tools.save_learning_log, requires_approval=True)
 
 # 第5回: 使う MCP サーバーの設定ファイル。Claude Desktop や Cursor と同じ "mcpServers" 形式
 MCP_CONFIG = Path(__file__).resolve().parent / "mcp_servers.json"
@@ -128,12 +131,68 @@ def main() -> None:
     print(f"[model] {MODEL}")
     if args.mcp:
         print("[tools] MCP サーバー（app/mcp_servers.json）")
-    try:
-        result = target.run_sync(args.question, model=build_model())
-    except ModelHTTPError as e:
-        print(api_error_message(e.status_code, str(e.body)[:200]))
-        raise SystemExit(1)
-    print(result.output)
+    
+    # DeferredToolRequests を処理するためのループ
+    conversation = None
+    while True:
+        try:
+            result = target.run_sync(
+                args.question if conversation is None else None,
+                model=build_model(),
+                conversation=conversation
+            )
+        except ModelHTTPError as e:
+            print(api_error_message(e.status_code, str(e.body)[:200]))
+            raise SystemExit(1)
+        
+        # DeferredToolRequests の処理
+        if isinstance(result.output, DeferredToolRequests):
+            print("\n承認が必要です:")
+            
+            # approvals（承認が必要なツール）を処理
+            approvals_dict = {}
+            if result.output.approvals:
+                for tool_call in result.output.approvals:
+                    print(f"  - ツール: {tool_call.tool_name}")
+                    print(f"    ID: {tool_call.tool_call_id}")
+                    print(f"    引数: {tool_call.args}")
+                    approvals_dict[tool_call.tool_call_id] = True
+            
+            # calls（実行結果が必要なツール）を処理
+            calls_dict = {}
+            if result.output.calls:
+                for tool_call in result.output.calls:
+                    print(f"  - ツール: {tool_call.tool_name}")
+                    print(f"    ID: {tool_call.tool_call_id}")
+                    print(f"    引数: {tool_call.args}")
+                    calls_dict[tool_call.tool_call_id] = "(external result)"
+            
+            response = input("\nこの操作を実行しますか？ (y/n): ").strip().lower()
+            if response == 'y':
+                print("操作を承認します。")
+                
+                # DeferredToolRequests.build_results() を使って承認を返す
+                deferred_results = result.output.build_results(
+                    approvals=approvals_dict,
+                    calls=calls_dict
+                )
+                
+                # 会話を続行（deferred_tool_requests が保持される）
+                result = target.run_sync(
+                    None,
+                    model=build_model(),
+                    conversation=result.conversation,
+                    deferred_tool_results=deferred_results
+                )
+                print(result.output)
+                break
+            else:
+                print("操作をキャンセルしました。")
+                break
+        else:
+            print(result.output)
+            break
+    
     if args.trace:
         print_trace(result)
 

@@ -105,3 +105,23 @@ def make_quiz(lecture: int) -> str:
         "term": selected["term"],
     }
     return json.dumps(quiz, ensure_ascii=False)
+
+
+def save_learning_log(content: str) -> str:
+    """学習ログを保存する。
+    
+    学習内容や進捗情報をファイルに記録する。
+    この操作は承認が必要です。
+    """
+    from datetime import datetime
+    
+    log_dir = Path(__file__).resolve().parent.parent / "learning_log"
+    log_dir.mkdir(exist_ok=True)
+    
+    # タイムスタンプ付きのファイル名を生成
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = log_dir / f"log_{timestamp}.txt"
+    
+    with open(log_file, "w", encoding="utf-8") as f:
+        f.write(content + "\n")
+    return f"学習ログを保存しました: {log_file}"
